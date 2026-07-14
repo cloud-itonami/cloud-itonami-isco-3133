@@ -1,0 +1,11 @@
+{:itonami.blueprint/id "cloud-itonami-isco-3133"
+ :itonami.blueprint/name "Chemical Processing Plant Operations Coordination"
+ :itonami.blueprint/isco-08 "3133"
+ :itonami.blueprint/domain :chemical/processing
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:chemical-safety :workplace-safety :process-efficiency :worker-protection]
+ :itonami.blueprint/governor :chemical-ops-governor
+ :itonami.blueprint/robotics true
+ :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :telemetry]
+ :itonami.blueprint/optional-technologies [:optimization]
+ :itonami.blueprint/status :public-oss}
