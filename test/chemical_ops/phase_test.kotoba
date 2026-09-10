@@ -1,0 +1,32 @@
+(ns chemical-ops.phase-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [chemical-ops.phase :as phase]))
+
+(deftest hard-outranks-escalate
+  (testing "a verdict that is both hard and escalating holds -- nobody may be asked to approve it"
+    (is (= :hold (phase/of-verdict {:hard? true :escalate? true})))
+    (is (= :hold (phase/of-verdict {:hard? true :escalate? false})))
+    (is (= :request-approval (phase/of-verdict {:hard? false :escalate? true})))
+    (is (= :commit (phase/of-verdict {:hard? false :escalate? false})))))
+
+(deftest only-commit-writes
+  (is (phase/writes? :commit))
+  (is (not (phase/writes? :hold)))
+  (is (not (phase/writes? :request-approval))))
+
+(deftest refusal-is-the-complement-of-writing
+  (testing "hold and request-approval are both refusals of the proposal as submitted"
+    (is (phase/refusal? :hold))
+    (is (phase/refusal? :request-approval))
+    (is (not (phase/refusal? :commit)))))
+
+(deftest request-approval-needs-a-human-and-is-not-terminal
+  (is (phase/human-required? :request-approval))
+  (is (not (phase/terminal? :request-approval)))
+  (is (phase/terminal? :hold))
+  (is (phase/terminal? :commit)))
+
+(deftest approved-commit-is-reached-only-from-an-escalation
+  (is (phase/approved-commit? :request-approval))
+  (is (not (phase/approved-commit? :commit)))
+  (is (not (phase/approved-commit? :hold))))

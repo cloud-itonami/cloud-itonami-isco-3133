@@ -1,5 +1,6 @@
 (ns chemical-ops.store-test
   (:require [clojure.test :refer [deftest is testing]]
+            [chemical-ops.ledger :as led]
             [chemical-ops.store :as store]))
 
 (deftest mem-store-basics
@@ -26,9 +27,14 @@
           record {:op :log-process-reading :payload {}}]
       (is (thrown? #?(:clj Exception :cljs js/Error) (store/commit-record! s record)))))
 
-  (testing "append-ledger! adds entries"
+  (testing "append-ledger! adds chained entries"
     (let [s (store/mem-store)
           entry {:disposition :commit :record {:plant-id :plant-1 :op :log-process-reading}}]
       (store/append-ledger! s entry)
       (is (= 1 (count (store/ledger s))))
-      (is (= entry (first (store/ledger s)))))))
+      (let [e (first (store/ledger s))]
+        (is (= entry (dissoc e :ledger/seq :ledger/prev :ledger/hash)))
+        (is (= 0 (:ledger/seq e)))
+        (is (= 0 (:ledger/prev e)))
+        (is (integer? (:ledger/hash e))))
+      (is (:ok? (led/verify (store/ledger s)))))))

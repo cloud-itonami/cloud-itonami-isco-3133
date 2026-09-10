@@ -1,0 +1,106 @@
+(ns chemical-ops.facts
+  "Well-formedness of the values the ISCO-08 3133 chemical processing plant
+  operations coordination actor governs: the plant record, the request, and
+  the proposal envelope.
+
+  Runtime: portable (pure predicates, no host interop).
+
+  ## Why this namespace exists
+
+  Two measurements on 66aeb11, both against the shipped governor, both
+  against a registered and verified plant.
+
+  The escalation invariant is a numeric comparison against `:confidence`, but
+  nothing established that `:confidence` was a number in range:
+
+      :confidence 1.5      => ok? true      ; above 1.0, admitted
+      :confidence \"high\"   => ClassCastException thrown from governor/check
+
+  A malformed proposal crashed the governor rather than being refused by it.
+  A governor that throws has not refused -- it has failed to answer, and the
+  caller cannot tell those apart from the stack trace alone.
+
+  Second, the vocabulary check compared `:op` against a set of keywords, so a
+  string op was simply not in the set:
+
+      :op \"log-process-reading\"   => ok? true   ; a string, admitted as undeclared
+
+  With the allowlist in `chemical-ops.operation` a string op is now refused as
+  undeclared, but the reason it is refused should be that it is not a keyword,
+  not that it happens to miss a keyword set. Those are different defects and
+  a ledger reader deserves the right name.
+
+  Every function here returns a vector of `{:rule .. :detail ..}` maps --
+  empty means well-formed -- so violations compose with the Governor's own
+  rules without a second shape."
+  (:require [chemical-ops.operation :as op]))
+
+(defn plant-record-violations
+  "A registered plant must be a record that says it is verified. The
+  governor already refuses `nil` (unregistered) and `:verified? false`; this
+  refuses a registration that is not a map at all, which `(:verified? x)`
+  would otherwise read as nil and report under the wrong rule."
+  [plant-record]
+  (cond-> []
+    (not (map? plant-record))
+    (conj {:rule :plant-not-a-record
+           :detail "plant record must be a map"})))
+
+(defn request-violations
+  "A request must name the plant it is about, and the name must be usable as
+  a store key."
+  [request]
+  (cond-> []
+    (not (map? request))
+    (conj {:rule :request-not-a-map :detail "request must be a map"})
+
+    (and (map? request) (nil? (:plant-id request)))
+    (conj {:rule :request-without-plant-id
+           :detail "request has no :plant-id"})))
+
+(defn proposal-violations
+  "The proposal envelope. Payload contents are the domain's business; the
+  envelope is the governor's, because routing decisions are read off it.
+
+  A missing `:confidence` already reads as 0.0 in the governor and thus
+  escalates, which is correct and left alone; a *present but unusable* one is
+  the defect -- it either crashes the comparison or slips past it."
+  [proposal]
+  (cond-> []
+    (not (map? proposal))
+    (conj {:rule :proposal-not-a-map :detail "proposal must be a map"})
+
+    (and (map? proposal) (not (keyword? (:op proposal))))
+    (conj {:rule :proposal-without-op :detail "proposal :op must be a keyword"})
+
+    (and (map? proposal)
+         (contains? proposal :confidence)
+         (some? (:confidence proposal))
+         (not (and (number? (:confidence proposal))
+                   (<= 0 (:confidence proposal) 1))))
+    (conj {:rule :confidence-out-of-range
+           :detail "proposal :confidence must be a number in [0.0, 1.0]"})
+
+    (and (map? proposal)
+         (contains? proposal :payload)
+         (some? (:payload proposal))
+         (not (map? (:payload proposal))))
+    (conj {:rule :payload-not-a-map
+           :detail "proposal :payload, when present, must be a map"})))
+
+(defn vocabulary-violations
+  "The operation must be one this repo declared. Undeclared and reserved are
+  reported as different rules on purpose -- see `chemical-ops.operation`.
+  Only asked of a keyword op: a non-keyword has already been reported by
+  `proposal-violations` and would only be reported twice."
+  [proposal]
+  (let [o (:op proposal)]
+    (cond
+      (op/reserved? o)
+      [{:rule :no-reactor-control :detail (op/reserved-reason o)}]
+
+      (and (keyword? o) (not (op/supported? o)))
+      [{:rule :undeclared-operation
+        :detail (str "operation " o " is not in chemical-ops.operation/supported")}]
+
+      :else [])))

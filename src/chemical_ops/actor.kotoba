@@ -1,32 +1,42 @@
 (ns chemical-ops.actor
-  "ChemicalOpsActor — the ISCO-08 3133 chemical processing plant
+  "ChemicalOpsActor -- the ISCO-08 3133 chemical processing plant
   operations coordination actor as a `langgraph.graph/state-graph`
   (per ADR-2607011000 / CLAUDE.md Actors section). One graph run = one
-  operations coordination request (intake → advise → govern → decide →
+  operations coordination request (intake -> advise -> govern -> decide ->
   commit/hold, with a human-approval interrupt for escalated proposals).
   No infinite internal loop; checkpointed per superstep so an interrupted
   run can resume after human sign-off.
 
   CRITICAL DESIGN NOTE: This actor supports plant-operator BACK-OFFICE
   COORDINATION WORKFLOW only. It does NOT directly control chemical reactors,
-  injection systems, process units, or emergency shutdown — those
+  injection systems, process units, or emergency shutdown -- those
   remain exclusively under licensed plant operators' human authority.
   The Governor enforces this hard boundary (see `chemical-ops.governor`).
 
   State graph:
   ```text
-  :intake -> :advise -> :govern -> :decide -+-> :commit           (:ok? true)
-                                             +-> :request-approval  (:escalate? true, interrupt-before)
-                                             +-> :hold              (:hard? true)
+  :intake -> :advise -> :govern -> :decide -+-> :commit                          (:ok? true)
+                                             +-> :escalate -> :request-approval   (:escalate? true, interrupt-before)
+                                             +-> :hold                            (:hard? true)
   ```
+
+  `:escalate` is new relative to 66aeb11. `:request-approval` is the node the
+  graph interrupts BEFORE, so its body only ever runs on resume -- which meant
+  an escalated request wrote nothing to the ledger until a human approved it,
+  and one that was never approved left no trace. `:escalate` runs before the
+  interrupt and writes the `:disposition :escalate` entry the store's
+  docstring had promised all along. `:request-approval` then marks the resume
+  as human-approved so `:commit` can record who authorised the write.
 
   The unconditional invariant: the ChemicalOpsAdvisor can never directly
   commit a record or dispatch a robot action the ChemicalOpsGovernor
-  refuses — every commit-record! call is gated behind `:decide`."
+  refuses -- every commit-record! call is gated behind `:decide`."
   (:require [langgraph.graph :as g]
             [langgraph.checkpoint :as cp]
             [chemical-ops.advisor :as advisor]
             [chemical-ops.governor :as governor]
+            [chemical-ops.ledger :as led]
+            [chemical-ops.phase :as phase]
             [chemical-ops.store :as store]))
 
 (defn build-graph
@@ -44,6 +54,7 @@
          :verdict     {:default nil}
          :disposition {:default nil}
          :record      {:default nil}
+         :approved-by {:default nil}
          :audit       {:reducer into :default []}}})
       (g/add-node :intake (fn [s] s))
       (g/add-node :advise
@@ -58,23 +69,32 @@
                         :audit [{:node :govern :verdict v}]})))
       (g/add-node :decide
                    (fn [{:keys [verdict]}]
-                     {:disposition (cond
-                                     (:hard? verdict) :hold
-                                     (:escalate? verdict) :request-approval
-                                     :else :commit)}))
-      (g/add-node :request-approval (fn [s] s))
+                     {:disposition (phase/of-verdict verdict)}))
+      ;; Runs BEFORE the interrupt, so the escalation is in the ledger while
+      ;; the question is still open.
+      (g/add-node :escalate
+                   (fn [{:keys [request proposal verdict]}]
+                     (store/append-ledger! store (led/escalate-entry request proposal verdict))
+                     {:audit [{:node :escalate :verdict verdict}]}))
+      ;; Passing through :request-approval is what a human resuming the
+      ;; interrupted thread looks like from inside the graph. It records that
+      ;; fact so :commit can tell an approved write from an automatic one --
+      ;; the graph is the only place that still knows the difference.
+      (g/add-node :request-approval
+                   (fn [s] (assoc s :approved-by :human)))
       (g/add-node :commit
-                   (fn [{:keys [request proposal]}]
+                   (fn [{:keys [request proposal approved-by]}]
                      (let [record {:plant-id (:plant-id request)
                                     :op (:op proposal)
-                                    :payload proposal}]
+                                    :payload proposal}
+                           by (or approved-by :actor)]
                        (store/commit-record! store record)
-                       (store/append-ledger! store {:disposition :commit :record record})
+                       (store/append-ledger! store (led/commit-entry record by))
                        {:record record
-                        :audit [{:node :commit :record record}]})))
+                        :audit [{:node :commit :record record :approved-by by}]})))
       (g/add-node :hold
                    (fn [{:keys [verdict]}]
-                     (store/append-ledger! store {:disposition :hold :verdict verdict})
+                     (store/append-ledger! store (led/hold-entry verdict))
                      {:audit [{:node :hold :verdict verdict}]}))
       (g/set-entry-point :intake)
       (g/add-edge :intake :advise)
@@ -85,8 +105,9 @@
        (fn [{:keys [disposition]}]
          (case disposition
            :commit :commit
-           :request-approval :request-approval
+           :request-approval :escalate
            :hold)))
+      (g/add-edge :escalate :request-approval)
       (g/add-edge :request-approval :commit)
       (g/set-finish-point :commit)
       (g/set-finish-point :hold)

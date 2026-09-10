@@ -1,63 +1,111 @@
 (ns chemical-ops.governor
-  "ChemicalOpsGovernor — the independent safety/traceability layer for
+  "ChemicalOpsGovernor -- the independent safety/traceability layer for
   the ISCO-08 3133 chemical processing plant operations coordination
   actor. Wired as its own `:govern` node in `chemical-ops.actor`'s StateGraph,
-  downstream of `:advise` — the Advisor has no notion of plant provenance
+  downstream of `:advise` -- the Advisor has no notion of plant provenance
   or operational risk, so this MUST be a separate system able to reject a
   proposal (itonami actor pattern, per ADR-2607011000 / CLAUDE.md Actors section).
 
   `check` is a pure function of (request, context, proposal, store) ->
-  verdict; it never mutates the store. The StateGraph's `:decide` node
-  routes on the verdict:
-    :hard? true                → :hold  (irreversible, no write)
-    :escalate? true            → :request-approval (interrupt-before)
-    otherwise                  → :commit
+  verdict; it never mutates the store. `chemical-ops.phase/of-verdict`
+  routes on it.
 
-  HARD invariants (:hard? true, ALWAYS :hold, never overridable):
-    1. plant provenance        — the request's plant-id must be registered and verified.
-    2. no-actuation            — proposal :effect must be :propose.
-    3. no-reactor-control      — proposal :op must NOT be :reactor-control,
-                                 :chemical-injection, :process-start,
-                                 or :emergency-shutdown (those are exclusively
-                                 licensed operator authority, never automated).
+  ## What this namespace decides, and what it delegates
 
-  ESCALATION invariants (:escalate? true, ALWAYS human sign-off):
-    4. :op :flag-anomalous-reading  — always escalates (high-safety signal).
-    5. low confidence (< `confidence-floor` = 0.7)."
-  (:require [chemical-ops.store :as store]))
+  It used to decide everything inline, and two of those decisions were
+  measurably wrong on 66aeb11. Each is now delegated to a namespace that can
+  be tested without building a graph:
+
+    vocabulary      -> chemical-ops.operation  (was: a private set of four
+                                               forbidden ops, i.e. a denylist
+                                               that admitted every op it had
+                                               not been told about -- an
+                                               :override-interlock proposal
+                                               reached :commit and was written)
+    well-formedness -> chemical-ops.facts      (was: no envelope check at all,
+                                               so :confidence 1.5 was admitted
+                                               and a string :confidence threw
+                                               out of `check`)
+    routing         -> chemical-ops.phase      (was: an inline `cond` in the
+                                               graph)
+
+  ## HARD invariants (`:hard? true`, ALWAYS `:hold`, never overridable)
+
+    1. plant provenance    -- the request must name a plant, and that plant
+       must be registered and verified.
+    2. no-actuation        -- proposal `:effect` must be `:propose`.
+    3. no-reactor-control  -- reactor control, chemical injection, process
+       start, emergency shutdown, interlock override and safety system
+       activation are exclusively licensed operator authority
+       (`chemical-ops.operation/reserved`).
+    4. declared vocabulary -- an op outside `chemical-ops.operation/supported`
+       is refused as undeclared. This is the allowlist: it is what makes the
+       rule above a boundary rather than a list of examples.
+    5. well-formed envelope -- a proposal whose `:op` is not a keyword or
+       whose `:confidence` is present but not a number in [0,1] is refused
+       rather than compared against.
+
+  ## ESCALATION invariants (`:escalate? true`, ALWAYS human sign-off)
+
+    6. operations declared `:escalates?` (`:flag-anomalous-reading`).
+    7. confidence below `confidence-floor`."
+  (:require [chemical-ops.facts :as facts]
+            [chemical-ops.operation :as op]
+            [chemical-ops.store :as store]))
 
 (def confidence-floor 0.7)
-(def ^:private forbidden-ops
-  #{:reactor-control :chemical-injection :process-start :emergency-shutdown})
-(def ^:private escalating-ops #{:flag-anomalous-reading})
 
-(defn- hard-violations [{:keys [proposal]} plant-record]
-  (cond-> []
-    (nil? plant-record)
-    (conj {:rule :no-plant :detail "unregistered or unverified plant"})
+(defn- hard-violations
+  "Every hard rule, in one vector. Ordering is presentational only -- any
+  non-empty result holds."
+  [request proposal plant-record]
+  (into []
+        (concat
+         (facts/request-violations request)
+         (facts/proposal-violations proposal)
+         (facts/vocabulary-violations proposal)
+         ;; Provenance is asked only when a plant was actually named; a
+         ;; request without one has already been reported above and
+         ;; reporting :no-plant as well would say the same thing twice.
+         (when-not (seq (facts/request-violations request))
+           (cond
+             (nil? plant-record)
+             [{:rule :no-plant :detail "unregistered plant"}]
 
-    (not (:verified? plant-record))
-    (conj {:rule :unverified-plant :detail "plant must be verified before operations"})
+             (seq (facts/plant-record-violations plant-record))
+             (facts/plant-record-violations plant-record)
 
-    (not= :propose (:effect proposal))
-    (conj {:rule :no-actuation :detail "effect must be :propose only (no direct actuation)"})
+             (not (:verified? plant-record))
+             [{:rule :unverified-plant :detail "plant must be verified before operations"}]))
+         (when (not= :propose (:effect proposal))
+           [{:rule :no-actuation :detail "effect must be :propose only (no direct actuation)"}]))))
 
-    (contains? forbidden-ops (:op proposal))
-    (conj {:rule :no-reactor-control :detail "reactor control, chemical injection, process start, and emergency shutdown are exclusively licensed operator authority"})))
+(defn- usable-confidence
+  "The confidence to compare against the floor. Only reached once
+  `facts/proposal-violations` has admitted the envelope, so a non-number here
+  is impossible rather than merely unlikely -- but an absent confidence is
+  legitimate and reads as 0.0, which escalates."
+  [proposal]
+  (let [c (:confidence proposal)]
+    (if (number? c) c 0.0)))
 
 (defn check
   "Assess a proposal against `request`/`context`/`proposal` and a
   `store` implementing `chemical-ops.store/Store`. Returns
   `{:ok? bool :violations [...] :confidence n :hard? bool :escalate? bool}`."
-  [request context proposal store]
-  (let [plant-record (store/plant store (:plant-id request))
-        hard (hard-violations {:proposal proposal} plant-record)
+  ;; `context` is part of the node's signature and is deliberately unused:
+  ;; this governor's rules are all functions of the request, the proposal and
+  ;; the registered plant. It is named with a leading underscore so that stays
+  ;; a statement rather than an oversight.
+  [request _context proposal store]
+  (let [plant-record (when (map? request) (store/plant store (:plant-id request)))
+        hard (hard-violations request proposal plant-record)
         hard? (boolean (seq hard))
-        conf (or (:confidence proposal) 0.0)
+        conf (usable-confidence proposal)
         low? (< conf confidence-floor)
-        risky-op? (contains? escalating-ops (:op proposal))]
-    {:ok? (and (not hard?) (not low?) (not risky-op?))
+        escalating-op? (op/escalates? (:op proposal))]
+    {:ok? (and (not hard?) (not low?) (not escalating-op?))
      :violations hard
      :confidence conf
      :hard? hard?
-     :escalate? (and (not hard?) (or low? risky-op?))}))
+     :escalate? (and (not hard?) (or low? escalating-op?))}))
