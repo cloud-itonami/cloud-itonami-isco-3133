@@ -1,0 +1,52 @@
+(ns chemical-ops.facts-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [chemical-ops.facts :as facts]))
+
+(defn- rules [vs] (set (map :rule vs)))
+
+(deftest a-well-formed-proposal-has-no-violations
+  (is (= [] (facts/proposal-violations {:op :log-process-reading :effect :propose :confidence 0.9})))
+  (is (= [] (facts/proposal-violations {:op :log-process-reading :effect :propose})))
+  (is (= [] (facts/proposal-violations {:op :log-process-reading :effect :propose :confidence 0.9 :payload {:tag "TI-201"}}))))
+
+(deftest confidence-must-be-a-number-in-range
+  (testing "above 1.0 -- measured admitted on 66aeb11"
+    (is (contains? (rules (facts/proposal-violations {:op :log-process-reading :confidence 1.5}))
+                   :confidence-out-of-range)))
+  (testing "a string -- measured to throw ClassCastException out of the governor on 66aeb11"
+    (is (contains? (rules (facts/proposal-violations {:op :log-process-reading :confidence "high"}))
+                   :confidence-out-of-range)))
+  (testing "below zero"
+    (is (contains? (rules (facts/proposal-violations {:op :log-process-reading :confidence -0.2}))
+                   :confidence-out-of-range)))
+  (testing "the boundaries themselves are in range"
+    (is (= [] (facts/proposal-violations {:op :log-process-reading :confidence 0})))
+    (is (= [] (facts/proposal-violations {:op :log-process-reading :confidence 1})))
+    (is (= [] (facts/proposal-violations {:op :log-process-reading :confidence 1.0})))))
+
+(deftest op-must-be-a-keyword
+  (is (contains? (rules (facts/proposal-violations {:op "log-process-reading"})) :proposal-without-op))
+  (is (contains? (rules (facts/proposal-violations {})) :proposal-without-op))
+  (is (contains? (rules (facts/proposal-violations nil)) :proposal-not-a-map)))
+
+(deftest payload-when-present-must-be-a-map
+  (is (contains? (rules (facts/proposal-violations {:op :log-process-reading :payload "TI-201=180"}))
+                 :payload-not-a-map))
+  (is (= [] (facts/proposal-violations {:op :log-process-reading :payload nil}))))
+
+(deftest request-must-name-a-plant
+  (is (= [] (facts/request-violations {:plant-id :p1})))
+  (is (contains? (rules (facts/request-violations {})) :request-without-plant-id))
+  (is (contains? (rules (facts/request-violations nil)) :request-not-a-map)))
+
+(deftest plant-record-must-be-a-record
+  (is (= [] (facts/plant-record-violations {:name "P1" :verified? true})))
+  (is (contains? (rules (facts/plant-record-violations "P1")) :plant-not-a-record)))
+
+(deftest vocabulary-names-reserved-and-undeclared-differently
+  (is (= [:no-reactor-control] (mapv :rule (facts/vocabulary-violations {:op :reactor-control}))))
+  (is (= [:no-reactor-control] (mapv :rule (facts/vocabulary-violations {:op :interlock-override}))))
+  (is (= [:undeclared-operation] (mapv :rule (facts/vocabulary-violations {:op :vent-to-atmosphere}))))
+  (is (= [] (facts/vocabulary-violations {:op :log-process-reading})))
+  (testing "a non-keyword op is proposal-violations' finding, not a second one here"
+    (is (= [] (facts/vocabulary-violations {:op "reactor-control"})))))

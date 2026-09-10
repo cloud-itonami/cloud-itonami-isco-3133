@@ -1,0 +1,87 @@
+(ns chemical-ops.actor-test
+  "The wired graph, not the pure governor. Every defect measured on 66aeb11
+  that these tests pin was invisible to governor_test because it only ever
+  showed up once a StateGraph was built and run."
+  (:require [clojure.test :refer [deftest is testing]]
+            [chemical-ops.actor :as actor]
+            [chemical-ops.advisor :as advisor]
+            [chemical-ops.ledger :as led]
+            [chemical-ops.store :as store]))
+
+(def plants {:plant-1 {:name "Plant 1" :status :operational :verified? true}})
+
+(defn- run [request thread]
+  (let [st (store/mem-store plants)
+        g (actor/build-graph {:store st})
+        r (actor/run-request! g request nil thread)]
+    {:store st :graph g :result r :state (:state r)}))
+
+(deftest an-undeclared-operation-is-held-and-never-written
+  (testing "measured on 66aeb11: :override-interlock reached :commit and was written"
+    (let [{:keys [store state result]} (run {:plant-id :plant-1 :op :override-interlock
+                                             :payload {:interlock "LSHH-101"}} "t-undeclared")]
+      (is (= :done (:status result)))
+      (is (= :hold (:disposition state)))
+      (is (= 0 (count (store/records store))))
+      (is (= [:hold] (mapv :disposition (store/ledger store))))
+      (is (= [:undeclared-operation]
+             (mapv :rule (get-in (first (store/ledger store)) [:verdict :violations])))))))
+
+(deftest a-reserved-operation-is-held-for-the-reason-the-readme-states
+  (let [{:keys [store state]} (run {:plant-id :plant-1 :op :interlock-override} "t-reserved")]
+    (is (= :hold (:disposition state)))
+    (is (= 0 (count (store/records store))))
+    (is (= [:no-reactor-control]
+           (mapv :rule (get-in (first (store/ledger store)) [:verdict :violations]))))))
+
+(deftest an-escalation-is-in-the-ledger-before-anyone-approves-it
+  (testing "measured on 66aeb11: the ledger was [] while the thread waited"
+    (let [{:keys [store state result]} (run {:plant-id :plant-1 :op :flag-anomalous-reading
+                                             :payload {:tag "TI-201" :value 412}} "t-escalate")]
+      (is (= :interrupted (:status result)))
+      (is (= :request-approval (:disposition state)))
+      (is (= 0 (count (store/records store))))
+      (is (= [:escalate] (mapv :disposition (store/ledger store))))
+      (let [e (first (store/ledger store))]
+        (is (= :pending (:approved-by e)))
+        (is (= :flag-anomalous-reading (:op e)))
+        (is (= :plant-1 (:plant-id e)))))))
+
+(deftest a-human-approved-write-says-so
+  (testing "measured on 66aeb11: approved and automatic commits had identical ledger shape"
+    (let [{:keys [store graph]} (run {:plant-id :plant-1 :op :flag-anomalous-reading
+                                      :payload {:tag "TI-201" :value 412}} "t-approve")
+          r2 (actor/approve! graph "t-approve")]
+      (is (= :done (:status r2)))
+      (is (= 1 (count (store/records store))))
+      (is (= [:escalate :commit] (mapv :disposition (store/ledger store))))
+      (is (= :human (:approved-by (peek (store/ledger store)))))
+      (is (:ok? (led/verify (store/ledger store)))))))
+
+(deftest an-automatic-write-is-marked-as-the-actors
+  (let [{:keys [store state]} (run {:plant-id :plant-1 :op :log-process-reading
+                                    :payload {:tag "TI-201" :value 180}} "t-auto")]
+    (is (= :commit (:disposition state)))
+    (is (= 1 (count (store/records store))))
+    (is (= [:commit] (mapv :disposition (store/ledger store))))
+    (is (= :actor (:approved-by (peek (store/ledger store)))))))
+
+(deftest a-malformed-proposal-is-refused-not-thrown
+  (testing "measured on 66aeb11: a string :confidence threw ClassCastException out of :govern"
+    (let [st (store/mem-store plants)
+          advisor (reify advisor/Advisor
+                    (-advise [_ _ request]
+                      {:op (:op request) :payload {} :confidence "high" :effect :propose}))
+          g (actor/build-graph {:store st :advisor advisor})
+          r (actor/run-request! g {:plant-id :plant-1 :op :log-process-reading} nil "t-malformed")]
+      (is (= :done (:status r)))
+      (is (= :hold (:disposition (:state r))))
+      (is (= 0 (count (store/records st))))
+      (is (= [:confidence-out-of-range]
+             (mapv :rule (get-in (first (store/ledger st)) [:verdict :violations])))))))
+
+(deftest every-ledger-the-graph-leaves-behind-verifies
+  (doseq [[op thread] [[:log-process-reading "v-1"] [:reactor-control "v-2"]
+                       [:vent-to-atmosphere "v-3"] [:flag-anomalous-reading "v-4"]]]
+    (let [{:keys [store]} (run {:plant-id :plant-1 :op op} thread)]
+      (is (:ok? (led/verify (store/ledger store))) (str op)))))

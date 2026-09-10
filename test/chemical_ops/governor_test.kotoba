@@ -102,3 +102,79 @@
           s (store/mem-store {:plant-1 {:name "Plant 1" :status :operational :verified? true}})
           verdict (gov/check request nil proposal s)]
       (is (:ok? verdict)))))
+
+;; ---- added 2026-09-11: the allowlist and the envelope --------------------
+;; Each of these was measured to pass through `check` on 66aeb11.
+
+(defn- verified-store []
+  (store/mem-store {:plant-1 {:name "Plant 1" :status :operational :verified? true}}))
+
+(defn- rules [verdict] (mapv :rule (:violations verdict)))
+
+(deftest hard-on-undeclared-operation
+  (testing "an op nobody declared holds -- the governor is an allowlist, not a denylist"
+    (doseq [op [:open-relief-valve :override-interlock :vent-to-atmosphere
+                :bypass-scrubber :delete-operation-record]]
+      (let [verdict (gov/check {:plant-id :plant-1} nil
+                               {:op op :effect :propose :confidence 0.95}
+                               (verified-store))]
+        (is (:hard? verdict) (str op))
+        (is (not (:ok? verdict)) (str op))
+        (is (not (:escalate? verdict)) (str op))
+        (is (= [:undeclared-operation] (rules verdict)) (str op))))))
+
+(deftest hard-on-every-reserved-operation-with-its-reason
+  (doseq [op [:reactor-control :chemical-injection :process-start
+              :emergency-shutdown :interlock-override :safety-system-activation]]
+    (let [verdict (gov/check {:plant-id :plant-1} nil
+                             {:op op :effect :propose :confidence 0.95}
+                             (verified-store))]
+      (is (:hard? verdict) (str op))
+      (is (= [:no-reactor-control] (rules verdict)) (str op))
+      (is (string? (:detail (first (:violations verdict)))) (str op)))))
+
+(deftest hard-on-a-string-op
+  (let [verdict (gov/check {:plant-id :plant-1} nil
+                           {:op "log-process-reading" :effect :propose :confidence 0.95}
+                           (verified-store))]
+    (is (:hard? verdict))
+    (is (= [:proposal-without-op] (rules verdict)))))
+
+(deftest hard-on-confidence-out-of-range
+  (testing "1.5 was admitted on 66aeb11"
+    (let [verdict (gov/check {:plant-id :plant-1} nil
+                             {:op :log-process-reading :effect :propose :confidence 1.5}
+                             (verified-store))]
+      (is (:hard? verdict))
+      (is (= [:confidence-out-of-range] (rules verdict)))))
+  (testing "a string threw ClassCastException on 66aeb11; now it holds"
+    (let [verdict (gov/check {:plant-id :plant-1} nil
+                             {:op :log-process-reading :effect :propose :confidence "high"}
+                             (verified-store))]
+      (is (:hard? verdict))
+      (is (= [:confidence-out-of-range] (rules verdict))))))
+
+(deftest confidence-exactly-at-the-floor-does-not-escalate
+  (testing "the floor is a strict less-than; 0.7 commits, 0.69 escalates"
+    (is (:ok? (gov/check {:plant-id :plant-1} nil
+                         {:op :log-process-reading :effect :propose :confidence 0.7}
+                         (verified-store))))
+    (is (:escalate? (gov/check {:plant-id :plant-1} nil
+                               {:op :log-process-reading :effect :propose :confidence 0.69}
+                               (verified-store))))))
+
+(deftest hard-and-escalating-holds-rather-than-escalates
+  (testing "a reserved op with low confidence holds; nobody can be asked to approve it"
+    (let [verdict (gov/check {:plant-id :plant-1} nil
+                             {:op :reactor-control :effect :propose :confidence 0.1}
+                             (verified-store))]
+      (is (:hard? verdict))
+      (is (not (:escalate? verdict))))))
+
+(deftest hard-on-a-request-without-a-plant-id
+  (let [verdict (gov/check {} nil
+                           {:op :log-process-reading :effect :propose :confidence 0.95}
+                           (verified-store))]
+    (is (:hard? verdict))
+    (is (= [:request-without-plant-id] (rules verdict)))))
+

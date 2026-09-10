@@ -5,7 +5,14 @@
 
   A minimal implementation holds all state in memory (MemStore).
   Production implementations will implement the Store protocol against
-  a durable backend (e.g. datomic).")
+  a durable backend (e.g. datomic).
+
+  `append-ledger!` goes through `chemical-ops.ledger/append`, so every entry
+  the store holds carries `:ledger/seq`, `:ledger/prev` and `:ledger/hash`
+  and the whole vector answers `chemical-ops.ledger/verify`. Measured on
+  66aeb11 the store's `conj` gave the README's word 'append-only' nothing in
+  the artifact to stand on."
+  (:require [chemical-ops.ledger :as led]))
 
 (defprotocol Store
   "A backing data store for chemical plant operations coordination."
@@ -18,7 +25,8 @@
     Throws on error.")
   (append-ledger! [store entry]
     "Atomically append an audit ledger entry to the immutable ledger.
-    Entry shape: `{:disposition :commit|:hold|:escalate :record|:verdict ..}`.")
+    Entry shape: `{:disposition :commit|:hold|:escalate ..}` plus the
+    `:ledger/*` chain keys `chemical-ops.ledger/entry` adds.")
   (records [store]
     "Return the seq of committed operation records.")
   (ledger [store]
@@ -33,7 +41,7 @@
       (throw (ex-info "commit-record! requires :plant-id" {:record record})))
     (swap! records-ref conj record))
   (append-ledger! [_ entry]
-    (swap! ledger-ref conj entry))
+    (swap! ledger-ref led/append entry))
   (records [_]
     @records-ref)
   (ledger [_]

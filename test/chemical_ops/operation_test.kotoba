@@ -1,0 +1,35 @@
+(ns chemical-ops.operation-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [chemical-ops.operation :as op]))
+
+(deftest supported-and-reserved-are-disjoint
+  (testing "an op cannot be both proposable and reserved to the operator"
+    (is (empty? (filter op/reserved? (keys op/supported))))
+    (is (empty? (filter op/supported? (keys op/reserved))))))
+
+(deftest the-readme-operations-are-the-supported-vocabulary
+  (testing "exactly the four proposal operations the README lists"
+    (is (= #{:log-process-reading :schedule-maintenance
+             :flag-anomalous-reading :coordinate-shift-handover}
+           (set (keys op/supported))))))
+
+(deftest the-readme-boundary-is-reserved
+  (testing "every op the README names as licensed-operator authority is reserved, with a reason"
+    (doseq [o [:reactor-control :chemical-injection :process-start
+               :emergency-shutdown :interlock-override :safety-system-activation]]
+      (is (op/reserved? o) (str o))
+      (is (string? (op/reserved-reason o)) (str o)))))
+
+(deftest undeclared-operations-answer-false-everywhere
+  (testing "an op nobody declared is neither supported, reserved, declared nor escalating"
+    (doseq [o [:vent-to-atmosphere :bypass-scrubber :delete-operation-record
+               :open-relief-valve "log-process-reading" nil]]
+      (is (not (op/supported? o)) (pr-str o))
+      (is (not (op/reserved? o)) (pr-str o))
+      (is (not (op/declared? o)) (pr-str o))
+      (is (false? (op/escalates? o)) (pr-str o)))))
+
+(deftest only-flag-anomalous-reading-escalates-by-itself
+  (is (op/escalates? :flag-anomalous-reading))
+  (doseq [o [:log-process-reading :schedule-maintenance :coordinate-shift-handover]]
+    (is (not (op/escalates? o)) (str o))))

@@ -1,0 +1,103 @@
+(ns chemical-ops.operation
+  "The closed vocabulary of operations the ISCO-08 3133 chemical processing
+  plant operations coordination actor may propose.
+
+  Runtime: portable (pure data + pure predicates, no host interop).
+
+  ## Why this namespace exists
+
+  Before it, the operation vocabulary lived in three places that could not
+  disagree loudly: the README's prose list, the Advisor's docstring, and the
+  Governor's private `forbidden-ops` set of four names. That made the
+  Governor a *denylist* -- it blocked four named ops and admitted everything
+  else. Measured on 66aeb11, against a registered and verified plant, with
+  `:effect :propose` and `:confidence 0.95`:
+
+      op=:open-relief-valve        ok?=true  hard?=false
+      op=:override-interlock       ok?=true  hard?=false
+      op=:vent-to-atmosphere       ok?=true  hard?=false
+      op=:bypass-scrubber          ok?=true  hard?=false
+      op=:delete-operation-record  ok?=true  hard?=false
+
+  and through the wired graph `:override-interlock` reached `:commit` and was
+  written to the operation records -- the README's own scope boundary names
+  process control interlocks as something this actor has no authority over.
+  An actor whose operation set is open cannot be governed, because the
+  governor is answering a question about a vocabulary nobody declared. So the
+  vocabulary is declared here, once, as an allowlist, and
+  `chemical-ops.governor` refuses anything outside it.
+
+  ## Two disjoint maps
+
+  * `supported` -- what the actor may propose. `:escalates?` is a property of
+    the operation, not of the governor's mood, so it lives beside it.
+  * `reserved`  -- operations that name authority belonging exclusively to
+    licensed plant engineers and operators. These are *declared* rather than
+    merely absent so the refusal can say why: an undeclared op is a vocabulary
+    error, a reserved op is a professional-authority boundary. Conflating them
+    would let a future edit `supported`-list one of them by accident.")
+
+(def supported
+  "Operations the actor may propose. The value carries the operation's own
+  properties; `:escalates?` true means human sign-off is required regardless
+  of advisor confidence."
+  {:log-process-reading
+   {:escalates? false
+    :summary "routine output/parameter reading logging (temperature, pressure, flow, conversion)"}
+
+   :schedule-maintenance
+   {:escalates? false
+    :summary "maintenance scheduling proposal (catalyst replacement, exchanger cleaning, valve inspection)"}
+
+   :flag-anomalous-reading
+   {:escalates? true
+    :summary "surface an out-of-range reading for human judgement"}
+
+   :coordinate-shift-handover
+   {:escalates? false
+    :summary "shift-handover coordination note (handoff checklist, notable conditions)"}})
+
+(def reserved
+  "Operations reserved to licensed plant engineers and operators. Naming one
+  in a proposal is a permanent hard block, never an escalation: escalation
+  would imply a human could approve the *actor* doing it, and no human can
+  delegate this. The first four are the names the README has carried since
+  the repository was scaffolded; the last two are the README's own scope
+  boundary (\"process control interlocks, or safety system activation\")
+  given a name so the governor can refuse them for the reason the README
+  states rather than as merely undeclared."
+  {:reactor-control
+   {:reason "reactor control is exclusively licensed operator authority"}
+
+   :chemical-injection
+   {:reason "chemical dosing and injection is exclusively licensed operator authority"}
+
+   :process-start
+   {:reason "starting a process unit is exclusively licensed operator authority"}
+
+   :emergency-shutdown
+   {:reason "emergency shutdown is exclusively licensed operator authority"}
+
+   :interlock-override
+   {:reason "process control interlocks are exclusively licensed operator authority"}
+
+   :safety-system-activation
+   {:reason "safety system activation is exclusively licensed operator authority"}})
+
+(defn supported? [op] (contains? supported op))
+(defn reserved? [op] (contains? reserved op))
+
+(defn declared?
+  "True if `op` is named anywhere in this vocabulary. An op that is neither
+  supported nor reserved is undeclared -- the governor refuses it."
+  [op]
+  (or (supported? op) (reserved? op)))
+
+(defn escalates?
+  "True if the operation itself always requires human sign-off. Unsupported
+  ops are never reached by this predicate (the governor hard-blocks first),
+  so a false here is not an admission."
+  [op]
+  (boolean (get-in supported [op :escalates?])))
+
+(defn reserved-reason [op] (get-in reserved [op :reason]))
