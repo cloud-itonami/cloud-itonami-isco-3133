@@ -13,7 +13,7 @@
       (defn broken-probe [] (inc))
 
   to src/chemical_ops/phase.kotoba -- an unambiguous arity error -- and running
-  `clojure -M:lint`:
+  `kbb -M:lint`:
 
       linting took 9ms, errors: 0, warnings: 0
 

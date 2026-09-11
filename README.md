@@ -95,9 +95,9 @@ An escalation is written to the audit ledger as `:disposition :escalate` *before
 The sources are `.kotoba` (owner-instructed rename, 2026-09-10) and are loaded by path — `require` and `clojure.tools.namespace` do not resolve the extension, so `cognitect.test-runner` and `clj-kondo --lint src` both report a clean zero on this tree. The three entry points build their own file lists and **refuse (exit 2) rather than pass** when they found nothing, ran nothing, or ran less than this README publishes:
 
 ```bash
-clojure -M:test   # 56 tests / 256 assertions across 8 namespaces; exit 2 if fewer ran
-clojure -M:sim    # the scenario table; exit 1 if it demonstrated no refusal
-clojure -M:lint   # clj-kondo over every .kotoba file by name; exit 2 if it read none
+kbb -M:test   # 56 tests / 256 assertions across 8 namespaces; exit 2 if fewer ran
+kbb -M:sim    # the scenario table; exit 1 if it demonstrated no refusal
+kbb -M:lint   # clj-kondo over every .kotoba file by name; exit 2 if it read none
 ```
 
 `amu compile` does not yet accept these sources (the rename commit says so and calls the compiler's refusals its work list); that migration is separate from the suite running.
