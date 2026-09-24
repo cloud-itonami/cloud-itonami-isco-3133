@@ -1,0 +1,31 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:physics` runs it.
+;;
+;; README "Robotics premise": a telemetry-monitoring robot performs routine
+;; process readings, maintenance scheduling and anomalous-condition flagging
+;; for chemical processing plant controllers (ISCO 3133). Its physical work
+;; is drawing a viscous process sample through a sample line, and draining a
+;; day tank to the level the next reading needs.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+;; Replacing an estimate with a sourced value is this bot's growth work.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isco-3133"
+ :cases
+ [{:id :viscous-sample-line
+   :kind :pipe-flow
+   :procedure "glycol-like process liquid (1110 kg/m3, 16 mPa s) is drawn through 15 m of 10 mm sample line"
+   :params {:diameter-m 0.010 :length-m 15.0 :roughness-m 1.5e-6
+            :density-kg-m3 1110.0 :viscosity-pa-s 0.016}
+   :sweep {:param :q-m3s :values [2.0e-5 5.0e-5 1.0e-4 1.5e-4 2.5e-4]}
+   :quantity :pressure-drop-pa
+   :limit {:max 150000.0 :basis "estimate: ~1.5 bar available from the process to drive the sample loop"}
+   :boundary {:lo 1.0e-6 :hi 5.0e-4}}
+  {:id :day-tank-drain
+   :kind :tank-drain
+   :procedure "1 m2 day tank drains from 1.5 m to 0.1 m through its outlet valve"
+   :params {:tank-area-m2 1.0 :h0-m 1.5 :h-target-m 0.1 :cd 0.62}
+   :sweep {:param :orifice-area-m2 :values [5.0e-4 1.0e-3 2.0e-3 3.0e-3 5.0e-3]}
+   :quantity :time-to-target-s
+   :limit {:max 900.0 :basis "estimate: day tank down to its low mark within 15 minutes, before the next reading cycle"}
+   :boundary {:lo 1.0e-4 :hi 1.0e-2}}]}
