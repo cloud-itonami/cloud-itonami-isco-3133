@@ -22,7 +22,7 @@
   before the rename (b3fc906) they ran as 10 tests / 31 assertions. The runner had
   stopped being able to see them, and a suite that ran nothing returns
   the same value as a suite that ran everything and found no fault
-  (CLAUDE.md, ADR-2608136000, question 2).
+  (AGENTS.md, ADR-2608136000, question 2).
 
   The amu compiler does not accept these sources either -- measured
   the same day, `amu compile src/chemical_ops/store.kotoba` exits 65 with
